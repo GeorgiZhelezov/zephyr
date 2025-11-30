@@ -26,4 +26,5 @@ zephyr_sources_ifdef(CONFIG_MIPI_DBI_SF32LB mipi_dbi_sf32lb.c)
 zephyr_sources_ifdef(CONFIG_MIPI_DBI_SMARTBOND mipi_dbi_smartbond.c)
 zephyr_sources_ifdef(CONFIG_MIPI_DBI_SPI mipi_dbi_spi.c)
 zephyr_sources_ifdef(CONFIG_MIPI_DBI_STM32_FMC mipi_dbi_stm32_fmc.c)
+zephyr_sources_ifdef(CONFIG_MIPI_DBI_ESPRESSIF_LCD mipi_dbi_espressif_lcd.c)
 # zephyr-keep-sorted-stop
