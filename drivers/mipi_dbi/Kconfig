@@ -33,6 +33,7 @@ source "drivers/mipi_dbi/Kconfig.sf32lb_lcdc"
 source "drivers/mipi_dbi/Kconfig.smartbond"
 source "drivers/mipi_dbi/Kconfig.spi"
 source "drivers/mipi_dbi/Kconfig.stm32_fmc"
+source "drivers/mipi_dbi/Kconfig.espressif_lcd"
 # zephyr-keep-sorted-stop
 
 endif
