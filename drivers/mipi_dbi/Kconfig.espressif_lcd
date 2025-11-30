@@ -1,0 +1,6 @@
+config MIPI_DBI_ESPRESSIF_LCD
+	bool "MIPI DBI driver for ESP LCD peripheral"
+	default y
+	depends on DT_HAS_ESPRESSIF_ESP_MIPI_DBI_LCD_ENABLED && (SOC_ESP32S3 || SOC_ESP32P4)
+	help
+	  Enable support for MIPI DBI driver for ESP32-S3 or ESP32-P4 boards LCD peripheral.
