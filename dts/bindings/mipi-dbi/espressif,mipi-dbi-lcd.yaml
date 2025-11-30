@@ -1,0 +1,71 @@
+
+description: |
+  MIPI-DBI Mode B (Intel 8080) compatible for the ESP LCD peripheral.
+
+compatible: "espressif,esp-mipi-dbi-lcd"
+
+include : ["base.yaml", "pinctrl-device.yaml", "mipi-dbi-controller.yaml"]
+
+properties:
+
+  lcd-clock:
+    type: int
+    required: true
+    description: |
+      The clock frequency for the display. Check
+      hal/espressif/components/soc/{esp board}/include/soc/clk_tree_defs.h
+
+  bus-width:
+    type: int
+    required: true
+    enum: [8, 16]
+    description: |
+      The bus width of the display. Can be either 8 or 16 bits.
+
+  dc-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Data/command GPIO pin. Set to low when sending a command, or high when sending data.
+
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Reset GPIO pin. Set high to reset the display.
+
+  rd-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Read GPIO pin. Set high when reading from the display.
+
+  wr-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Write GPIO pin for type B (Intel 8080) mode.
+
+  cs-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Chip-select GPIO pin.
+
+  data-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      GPIO pins used for the parallel data bus. This must have as many entries as the bus is wide
+      of the selected mipi-mode.
+
+  dmas:
+    type: phandle-array
+    description: |
+      DMA channel to use for large data transfers. If not specified, the driver will use
+      polling-based transfers.
+
+  dma-names:
+    type: string-array
+    description: |
+      Names for the DMA channels. Should be "tx" for transmit channel.
