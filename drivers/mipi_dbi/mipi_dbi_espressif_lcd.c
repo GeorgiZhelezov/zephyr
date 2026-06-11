@@ -19,7 +19,7 @@
 #include <zephyr/drivers/dma/dma_esp32.h>
 #include <soc.h>
 #include <soc/gpio_sig_map.h>
-#include <soc/gdma_channel.h>
+#include <hal/gdma_channel.h>
 #include <hal/gpio_hal.h>
 #include <hal/gpio_types.h>
 #include <hal/gpio_ll.h>
@@ -27,22 +27,7 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(mipi_dbi_espressif_lcd, CONFIG_MIPI_DBI_LOG_LEVEL);
 
-/**
- * @brief Structure that contains the configuration of an IO
- */
-typedef struct {
-    uint32_t fun_sel;               /*!< Value of IOMUX function selection */
-    uint32_t sig_out;               /*!< Index of the outputting peripheral signal */
-    gpio_drive_cap_t drv;           /*!< Value of drive strength */
-    bool pu;                        /*!< Status of pull-up enabled or not */
-    bool pd;                        /*!< Status of pull-down enabled or not */
-    bool ie;                        /*!< Status of input enabled or not */
-    bool oe;                        /*!< Status of output enabled or not */
-    bool oe_ctrl_by_periph;         /*!< True if use output enable signal from peripheral, otherwise False */
-    bool oe_inv;                    /*!< Whether the output enable signal is inversed or not */
-    bool od;                        /*!< Status of open-drain enabled or not */
-    bool slp_sel;                   /*!< Status of pin sleep mode enabled or not */
-} gpio_io_config_t;
+/* gpio_io_config_t is now provided by the espressif HAL (hal/gpio_types.h) */
 
 /* GPIO configuration dump utility using ESP-IDF HAL functions */
 static void esp_gpio_dump_io_configuration(uint64_t io_bit_mask)
@@ -60,9 +45,7 @@ static void esp_gpio_dump_io_configuration(uint64_t io_bit_mask)
 
 		/* Use HAL function to get GPIO configuration */
 		gpio_io_config_t io_config = {0};
-		gpio_hal_get_io_config(&gpio_hal, gpio_num, &io_config.pu, &io_config.pd,
-		                       &io_config.ie, &io_config.oe, &io_config.od, &io_config.drv,
-		                       &io_config.fun_sel, &io_config.sig_out, &io_config.slp_sel);
+		gpio_hal_get_io_config(&gpio_hal, gpio_num, &io_config);
 
 		/* Convert drive capability enum to readable string */
 		const char *drive_str[] = {"0(weak)", "1(stronger)", "2(medium)", "3(strongest)" };
@@ -160,9 +143,15 @@ struct mipi_dbi_esp_lcd_config
 
 struct mipi_dbi_esp_lcd_data
 {
-	/* LCD transaction synchronization - single semaphore for all transfers */
+	/*
+	 * LCD transaction synchronization. TRANS_DONE implies the GDMA read
+	 * finished too (DMA always completes before the last byte is clocked
+	 * out), so a single completion semaphore covers both.
+	 */
 	struct k_sem lcd_transaction_done;
-	struct k_sem dma_transaction_done;
+
+	/* Serializes transactions between API callers */
+	struct k_mutex lock;
 
 	/* ESP-IDF interrupt handle */
 	intr_handle_t intr_handle;
@@ -214,10 +203,9 @@ static void mipi_dbi_esp_dma_callback(const struct device *dma_dev, void *user_d
 
 	// LOG_DBG("DMA callback - channel %d, status %d", channel, status);
 
-	/* Store DMA status for main thread to check */
-	k_sem_give(&data->dma_transaction_done);
+	ARG_UNUSED(data);
 
-	/* DMA callback only logs status - LCD ISR signals completion */
+	/* DMA callback only checks status - LCD ISR signals completion */
 	if (status != 0)
 	{
 		LOG_WRN("DMA transfer error: %d", status);
@@ -241,9 +229,9 @@ int mipi_dbi_esp_cmd_write(const struct device *dev, const struct mipi_dbi_confi
 		return -ENOTSUP;
 	}
 
-	/* Take semaphore before starting LCD transaction */
-	ret = k_sem_take(&esp_data->lcd_transaction_done, K_FOREVER);
-	if (ret) { k_panic(); }
+	/* Serialize callers; completion is awaited before returning below */
+	k_mutex_lock(&esp_data->lock, K_FOREVER);
+	k_sem_reset(&esp_data->lcd_transaction_done);
 
 	// LOG_INF("cmd_write: cmd=0x%02x, len=%zu, mode=%d", cmd, len, config->mode);
 	// if (len) { LOG_HEXDUMP_INF(data, len, "data:"); }
@@ -253,9 +241,6 @@ int mipi_dbi_esp_cmd_write(const struct device *dev, const struct mipi_dbi_confi
 
 	if (data && len && len < sizeof(dma_buff))
 	{
-		ret = k_sem_take(&esp_data->dma_transaction_done, K_FOREVER);
-		if (ret) { k_panic(); }
-
 		/* Configure GDMA for data transfer */
 		struct dma_block_config dma_block =
 		{
@@ -283,9 +268,18 @@ int mipi_dbi_esp_cmd_write(const struct device *dev, const struct mipi_dbi_confi
 		ret = dma_config(esp_config->dma_dev, esp_config->dma_channel, &dma_cfg);
 		if (ret != 0) {
 			LOG_ERR("DMA config failed: %d", ret);
+			k_mutex_unlock(&esp_data->lock);
 			return ret;
 		}
 	}
+
+	/*
+	 * Reset TX FIFO before reconfiguring, like esp_lcd's i80 driver does
+	 * for every transaction. Leftover FIFO bytes from the previous
+	 * transaction otherwise leak into this one and the new phase
+	 * configuration (command phase!) is not applied cleanly.
+	 */
+	lcd_ll_fifo_reset(lcd_dev);
 
 	lcd_ll_set_command(lcd_dev, esp_config->bus_width, cmd);
 	lcd_ll_set_dc_level(lcd_dev, 0, cmd ? 0 : 1, 0, data ? 1 : 0);
@@ -295,21 +289,27 @@ int mipi_dbi_esp_cmd_write(const struct device *dev, const struct mipi_dbi_confi
 
 	// lcd_ll_set_dc_delay_ticks(lcd_dev, 1);
 
-	// lcd_ll_fifo_reset(lcd_dev); // Reset FIFO for clean transaction
-
 	//start dma transaction here
 	if (data && len)
 	{
 		ret = dma_start(esp_config->dma_dev, esp_config->dma_channel);
 		if (ret != 0) {
 			LOG_ERR("DMA start failed: %d", ret);
+			k_mutex_unlock(&esp_data->lock);
 			return ret;
 		}
 		// k_busy_wait(5); //delay to ensure dma has transfered data to LCD FIFO
 	}
 
 	lcd_ll_start(lcd_dev);
-	// while (!(lcd_ll_get_interrupt_status(lcd_dev) & LCD_LL_EVENT_TRANS_DONE)) {}
+
+	/*
+	 * Block until the transfer fully completes so the caller may reuse
+	 * or free its buffer immediately after return.
+	 */
+	k_sem_take(&esp_data->lcd_transaction_done, K_FOREVER);
+
+	k_mutex_unlock(&esp_data->lock);
 
 	return 0;
 }
@@ -332,11 +332,9 @@ int mipi_dbi_esp_write_display(const struct device *dev, const struct mipi_dbi_c
 
 	// LOG_DBG("write_display: buf_len=%zu bytes", buf_len);
 
-	/* Take semaphore before starting LCD transaction */
-	ret = k_sem_take(&esp_data->lcd_transaction_done, K_FOREVER);
-	if (ret) { k_panic(); }
-	ret = k_sem_take(&esp_data->dma_transaction_done, K_FOREVER);
-	if (ret) { k_panic(); }
+	/* Serialize callers; completion is awaited before returning below */
+	k_mutex_lock(&esp_data->lock, K_FOREVER);
+	k_sem_reset(&esp_data->lcd_transaction_done);
 
 	// lcd_ll_reverse_bit_order(lcd_dev, false); // Ensure bit order is normal
 	// lcd_ll_swap_byte_order(lcd_dev, config->mode, true);  // Enable byte swapping for big-endian ST7789V
@@ -369,13 +367,15 @@ int mipi_dbi_esp_write_display(const struct device *dev, const struct mipi_dbi_c
 		goto cleanup;
 	}
 
+	/* Reset TX FIFO before reconfiguring (see comment in cmd_write) */
+	lcd_ll_fifo_reset(lcd_dev);
+
 	/* Set DC levels for data-only transfer: idle=0, cmd=1(data mode), dummy=0, data=1 */
 	lcd_ll_set_dc_level(lcd_dev, 0, 1, 0, 1);
 	/* Enable data phase only, use actual byte count for phase cycles */
 	lcd_ll_set_phase_cycles(lcd_dev, 0, 0, buf_len);
 	lcd_ll_enable_output_always_on(lcd_dev, true);
 	lcd_ll_set_blank_cycles(lcd_dev, 1, 1);    // Standard blank cycles for bulk data
-	// lcd_ll_fifo_reset(lcd_dev); // Reset FIFO for clean transaction
 
 	/* Start DMA transfer */
 	ret = dma_start(esp_config->dma_dev, esp_config->dma_channel);
@@ -386,9 +386,18 @@ int mipi_dbi_esp_write_display(const struct device *dev, const struct mipi_dbi_c
 
 	lcd_ll_start(lcd_dev);
 
-	return 0;
+	/*
+	 * Block until DMA and the LCD transaction complete so the caller's
+	 * framebuffer may be redrawn immediately after return. Returning
+	 * while DMA still reads the buffer lets the application overwrite
+	 * pixels in flight (stale-prefix tearing observed on logic analyzer).
+	 */
+	k_sem_take(&esp_data->lcd_transaction_done, K_FOREVER);
+
+	ret = 0;
 
 cleanup:
+	k_mutex_unlock(&esp_data->lock);
 	return ret;
 }
 
@@ -438,9 +447,9 @@ static int mipi_dbi_esp_lcd_init(const struct device *dev)
 	lcd_cam_dev_t *lcd_dev = &LCD_CAM;
 	int ret = 0;
 
-	/* Initialize LCD transaction semaphore */
-	k_sem_init(&data->lcd_transaction_done, 1, 1);
-	k_sem_init(&data->dma_transaction_done, 1, 1);
+	/* Initialize LCD transaction synchronization primitives */
+	k_sem_init(&data->lcd_transaction_done, 0, 1);
+	k_mutex_init(&data->lock);
 
 	/* Enable peripheral */
 	ret = clock_control_on(config->clock_dev, config->clock_subsys);
@@ -512,10 +521,10 @@ static int mipi_dbi_esp_lcd_init(const struct device *dev)
 	lcd_ll_enable_rgb_mode(lcd_dev, false);
 
 	/* Disable yuv converter */
-	lcd_ll_enable_rgb_yuv_convert(lcd_dev, false);
+	lcd_ll_enable_color_convert(lcd_dev, false);
 
 	/* Set data width for LCD peripheral */
-	lcd_ll_set_data_width(lcd_dev, config->bus_width);
+	lcd_ll_set_data_wire_width(lcd_dev, config->bus_width);
 
 	/* Enable LCD peripheral interrupt for ESP32-S3 */
 	lcd_ll_enable_interrupt(lcd_dev, LCD_LL_EVENT_TRANS_DONE, true);
