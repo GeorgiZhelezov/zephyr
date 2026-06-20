@@ -16,6 +16,14 @@ properties:
     type: phandle-array
     description: Optional GPIO used to control the panel chip-select line.
 
+  rd-gpios:
+    type: phandle-array
+    description: |
+      Optional GPIO connected to the panel read-strobe (RD) line. In 8080
+      write-only operation the panel still requires RD held inactive (high),
+      otherwise it keeps driving the shared data bus and contends with the
+      controller. Configured as an output and driven inactive at init.
+
 child-binding:
   description: Configuration for display connected to the controller
   properties:

@@ -52,6 +52,7 @@ struct mipi_dbi_esp32_config {
 	const struct gpio_dt_spec *cs_gpios;
 	uint16_t num_cs_gpios;
 	struct gpio_dt_spec reset_gpio;
+	struct gpio_dt_spec rd_gpio;
 	uint8_t tx_dma_channel;
 };
 
@@ -390,6 +391,25 @@ static int mipi_dbi_esp32_init(const struct device *dev)
 		}
 	}
 
+	/*
+	 * RD (read-strobe) is unused in 8080 write-only mode, but the panel will
+	 * keep driving the shared data bus unless RD is held inactive (high),
+	 * contending with the controller's writes. Drive it inactive at init.
+	 */
+	if (cfg->rd_gpio.port != NULL) {
+		if (!gpio_is_ready_dt(&cfg->rd_gpio)) {
+			LOG_ERR("RD GPIO port %s pin %d is not ready", cfg->rd_gpio.port->name,
+				cfg->rd_gpio.pin);
+			return -ENODEV;
+		}
+
+		ret = gpio_pin_configure_dt(&cfg->rd_gpio, GPIO_OUTPUT_INACTIVE);
+		if (ret < 0) {
+			LOG_ERR("Failed to configure RD GPIO (%d)", ret);
+			return ret;
+		}
+	}
+
 	lcd_ll_enable_bus_clock(LCD_BUS_ID, true);
 	lcd_ll_reset_register(LCD_BUS_ID);
 	lcd_hal_init(hal, LCD_BUS_ID);
@@ -468,6 +488,7 @@ static const struct mipi_dbi_esp32_config mipi_dbi_esp32_config = {
 	.cs_gpios = mipi_dbi_esp32_cs_gpios,
 	.num_cs_gpios = ARRAY_SIZE(mipi_dbi_esp32_cs_gpios),
 	.reset_gpio = GPIO_DT_SPEC_INST_GET_OR(0, reset_gpios, {NULL}),
+	.rd_gpio = GPIO_DT_SPEC_INST_GET_OR(0, rd_gpios, {NULL}),
 };
 
 static struct mipi_dbi_esp32_data mipi_dbi_esp32_data = {0};
