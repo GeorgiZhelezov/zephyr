@@ -234,7 +234,12 @@ static int mipi_dbi_esp32_transfer(const struct device *dev, const struct mipi_d
 	lcd_ll_enable_interrupt(hal->dev, LCD_LL_EVENT_TRANS_DONE, true);
 
 	if (send_cmd) {
-		lcd_ll_set_command(hal->dev, 8, cmd);
+		uint32_t cmd_width = (dbi_cfg->mode == MIPI_DBI_MODE_6800_BUS_16_BIT ||
+				      dbi_cfg->mode == MIPI_DBI_MODE_8080_BUS_16_BIT)
+					     ? 16
+					     : 8;
+
+		lcd_ll_set_command(hal->dev, cmd_width, cmd);
 	}
 
 	lcd_ll_set_phase_cycles(hal->dev, send_cmd ? 1 : 0, 0, len > 0 ? 1 : 0);
